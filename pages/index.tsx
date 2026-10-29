@@ -1,9 +1,9 @@
 import type { GetServerSideProps } from "next";
-import { SESSION_COOKIE, verifySessionToken } from "@/lib/session";
+import { REFRESH_COOKIE, verifyRefresh } from "@/lib/tokens";
 
-// Landing: route to the dashboard when signed in, otherwise to login.
+// Landing: a valid (non-revoked) refresh token means an active session.
 export const getServerSideProps: GetServerSideProps = async ({ req }) => {
-  const session = verifySessionToken(req.cookies[SESSION_COOKIE]);
+  const session = verifyRefresh(req.cookies[REFRESH_COOKIE]);
   return {
     redirect: {
       destination: session ? "/dashboard" : "/login",

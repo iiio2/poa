@@ -1,8 +1,9 @@
 import type { NextApiRequest, NextApiResponse } from "next";
 import { normalizePhone, requestOtp, revealCode } from "@/lib/otp-store";
+import { isTrustedDevice } from "@/lib/devices";
 
 type Data =
-  | { ok: true; expiresInSec: number; devCode?: string }
+  | { ok: true; expiresInSec: number; newDevice: boolean; devCode?: string }
   | { ok: false; error: string; retryAfterSec?: number };
 
 export default function handler(req: NextApiRequest, res: NextApiResponse<Data>) {
@@ -16,6 +17,9 @@ export default function handler(req: NextApiRequest, res: NextApiResponse<Data>)
     return res.status(400).json({ ok: false, error: "Enter a valid phone number." });
   }
 
+  const deviceId = String(req.body?.deviceId ?? "");
+  const newDevice = !isTrustedDevice(phone, deviceId);
+
   const result = requestOtp(phone);
   if (!result.ok) {
     return res.status(429).json({
@@ -28,7 +32,7 @@ export default function handler(req: NextApiRequest, res: NextApiResponse<Data>)
   return res.status(200).json({
     ok: true,
     expiresInSec: result.expiresInSec,
-    // Dev convenience: surface the code so you can test without SMS.
+    newDevice,
     ...(revealCode ? { devCode: result.code } : {}),
   });
 }

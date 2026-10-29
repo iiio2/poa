@@ -1,40 +1,64 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/pages/api-reference/create-next-app).
+# PayMock — simulated wallet auth
 
-## Getting Started
+A Next.js (pages router) demo of a **wallet-style OTP authentication lifecycle**,
+built entirely self-contained: OTPs are generated locally (no SMS, no third-party
+service), and sessions run on your own signed tokens. It's a starting point for
+building your own payments-style app and seeing the full auth flow work.
 
-First, run the development server:
+## Features
+
+- **Phone + OTP login** — country code, auto-advancing 6-box OTP input, resend timer
+- **Device verification** — new devices are detected and bound as trusted on verify
+- **Token exchange** — short-lived access token + rotating refresh token (revocable)
+- **Session readiness** — protected API (`/api/me`) with auto-refresh on 401
+- **PIN set & recovery** — recovery is a separate OTP-gated path (no session issued)
+- **Live auth panel** on the dashboard to watch each stage in real time
+
+## Run
 
 ```bash
-npm run dev
-# or
-yarn dev
-# or
+pnpm install
 pnpm dev
-# or
-bun dev
+# http://localhost:3000
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+Enter any 10-digit number. The 6-digit code appears on screen and in the server
+console (no SMS is sent). Then explore the dashboard's **Auth lifecycle** panel.
 
-You can start editing the page by modifying `pages/index.tsx`. The page auto-updates as you edit the file.
+### Environment
 
-[API routes](https://nextjs.org/docs/pages/building-your-application/routing/api-routes) can be accessed on [http://localhost:3000/api/hello](http://localhost:3000/api/hello). This endpoint can be edited in `pages/api/hello.ts`.
+Copy `.env.example` → `.env.local`:
 
-The `pages/api` directory is mapped to `/api/*`. Files in this directory are treated as [API routes](https://nextjs.org/docs/pages/building-your-application/routing/api-routes) instead of React pages.
+| Variable | Purpose |
+| --- | --- |
+| `SESSION_SECRET` | HMAC key for tokens (`openssl rand -hex 32`) |
+| `MOCK_OTP_CODE` | force a fixed OTP code (e.g. `123456`) |
 
-This project uses [`next/font`](https://nextjs.org/docs/pages/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+## Scripts
 
-## Learn More
+| Command | Description |
+| --- | --- |
+| `pnpm dev` | start the dev server |
+| `pnpm build` / `pnpm start` | production build / serve |
+| `pnpm lint` / `pnpm lint:fix` | oxlint check / autofix |
 
-To learn more about Next.js, take a look at the following resources:
+## Project structure
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn-pages-router) - an interactive Next.js tutorial.
+```
+lib/        crypto, tokens, otp-store, devices, users, device-id
+pages/      login, forgot-pin, dashboard, index (redirect)
+pages/api/  otp/{request,verify}, token/refresh, pin/{set,reset}, me, session, logout
+components/ OtpInput, Brand
+docs/       AUTH.md — full stage map, fields, headers, config, state
+```
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+## Auth lifecycle
 
-## Deploy on Vercel
+See **[docs/AUTH.md](docs/AUTH.md)** for the complete flow diagram and a mapping
+of every stage to its source file, request fields, headers, config and state.
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+## Notes
 
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/pages/building-your-application/deploying) for more details.
+- All stores are **in-memory** and reset on dev reload — fine for a mock.
+- To productionize *your own* app: swap the in-memory stores for a datastore and
+  the OTP "send" for a real SMS provider. The route/token/UI layers don't change.

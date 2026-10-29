@@ -1,9 +1,10 @@
 import type { NextApiRequest, NextApiResponse } from "next";
 import { normalizePhone, verifyOtp } from "@/lib/otp-store";
-import { createSessionToken, sessionCookie } from "@/lib/session";
+import { trustDevice } from "@/lib/devices";
+import { accessCookie, mintAccess, mintRefresh, refreshCookie } from "@/lib/tokens";
 
 type Data =
-  | { ok: true; phone: string }
+  | { ok: true; phone: string; deviceId: string; trusted: true; accessExpiresInSec: number }
   | { ok: false; error: string; attemptsLeft?: number };
 
 const MESSAGES: Record<string, string> = {
@@ -13,6 +14,8 @@ const MESSAGES: Record<string, string> = {
   mismatch: "Incorrect code.",
 };
 
+// Initial login / device verification: validates the OTP, binds the device as
+// trusted, and performs the token exchange (issues access + refresh).
 export default function handler(req: NextApiRequest, res: NextApiResponse<Data>) {
   if (req.method !== "POST") {
     res.setHeader("Allow", "POST");
@@ -21,6 +24,7 @@ export default function handler(req: NextApiRequest, res: NextApiResponse<Data>)
 
   const phone = normalizePhone(req.body?.phone);
   const code = String(req.body?.code ?? "").trim();
+  const deviceId = String(req.body?.deviceId ?? "");
   if (!phone || !code) {
     return res.status(400).json({ ok: false, error: "Phone and code are required." });
   }
@@ -35,7 +39,16 @@ export default function handler(req: NextApiRequest, res: NextApiResponse<Data>)
     });
   }
 
-  const token = createSessionToken(phone);
-  res.setHeader("Set-Cookie", sessionCookie(token));
-  return res.status(200).json({ ok: true, phone });
+  trustDevice(phone, deviceId);
+  const access = mintAccess(phone, deviceId, true);
+  const { token: refresh } = mintRefresh(phone, deviceId);
+  res.setHeader("Set-Cookie", [accessCookie(access), refreshCookie(refresh)]);
+
+  return res.status(200).json({
+    ok: true,
+    phone,
+    deviceId,
+    trusted: true,
+    accessExpiresInSec: 15 * 60,
+  });
 }
