@@ -120,9 +120,17 @@ export function verifyResetToken(token: string | undefined): string | null {
   return claims && claims.typ === "pin_reset" ? claims.sub : null;
 }
 
+// Secure cookies require HTTPS, so a plain-HTTP demo (e.g. a LAN IP) would drop
+// them. Default to on in production, but allow COOKIE_SECURE to override.
+function cookieSecure(): boolean {
+  if (process.env.COOKIE_SECURE === "true") return true;
+  if (process.env.COOKIE_SECURE === "false") return false;
+  return process.env.NODE_ENV === "production";
+}
+
 function cookie(name: string, value: string, maxAge: number): string {
   const parts = [`${name}=${value}`, "Path=/", "HttpOnly", "SameSite=Lax", `Max-Age=${maxAge}`];
-  if (process.env.NODE_ENV === "production") parts.push("Secure");
+  if (cookieSecure()) parts.push("Secure");
   return parts.join("; ");
 }
 

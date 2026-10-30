@@ -31,9 +31,9 @@ export default function OtpInput({
   const digits = Array.from({ length }, (_, i) => value[i] ?? "");
 
   useEffect(() => {
-    // focusSignal is an intentional trigger: bump it to re-focus the first box.
-    // oxlint-disable-next-line react/exhaustive-effect-dependencies
+    // focusSignal is in deps intentionally: bumping it re-focuses the first box.
     if (autoFocus) inputs.current[0]?.focus();
+    // oxlint-disable-next-line react/exhaustive-effect-dependencies
   }, [autoFocus, focusSignal]);
 
   function setDigit(index: number, digit: string) {

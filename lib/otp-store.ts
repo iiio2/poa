@@ -14,9 +14,9 @@ const RESEND_COOLDOWN_MS = 30 * 1000; // 30 seconds
 const SEND_WINDOW_MS = 10 * 60 * 1000; // 10 minutes
 const MAX_SENDS_PER_WINDOW = 5;
 
-// Set MOCK_OTP_CODE to force a fixed code (e.g. 123456). Otherwise a random
-// 6-digit code is generated and revealed in dev.
-const FIXED_CODE = process.env.MOCK_OTP_CODE;
+// Set MOCK_OTP_CODE to force a fixed code (e.g. 123456). An empty or unset value
+// means random — `|| undefined` so `MOCK_OTP_CODE=` isn't treated as a fixed "".
+const FIXED_CODE = process.env.MOCK_OTP_CODE || undefined;
 
 type OtpEntry = {
   code: string;
@@ -125,5 +125,9 @@ export function otpErrorResponse(result: Extract<VerifyResult, { ok: false }>): 
   };
 }
 
-/** Whether codes are revealed to the client (dev convenience). */
-export const revealCode = process.env.NODE_ENV !== "production";
+/**
+ * Whether codes are revealed to the client. On in dev; in production it's off
+ * unless MOCK_REVEAL_OTP=true (opt-in, for running this mock as a demo).
+ */
+export const revealCode =
+  process.env.NODE_ENV !== "production" || process.env.MOCK_REVEAL_OTP === "true";
