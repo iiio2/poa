@@ -333,7 +333,7 @@ function AuthPanel({
             placeholder={hasPin ? "New 4-6 digit PIN" : "Set 4-6 digit PIN"}
             value={pin}
             onChange={(e) => setPin(e.target.value.replace(/\D/g, "").slice(0, 6))}
-            className="h-10 flex-1 rounded-lg border border-black/[.12] bg-transparent px-3 text-sm text-black outline-none focus:border-indigo-500 dark:border-white/[.16] dark:text-zinc-50"
+            className="h-10 min-w-0 flex-1 rounded-lg border border-black/[.12] bg-transparent px-3 text-sm text-black outline-none focus:border-indigo-500 dark:border-white/[.16] dark:text-zinc-50"
           />
           <button
             type="submit"

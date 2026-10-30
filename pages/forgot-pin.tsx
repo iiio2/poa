@@ -139,7 +139,7 @@ export default function ForgotPin() {
                   placeholder="Mobile number"
                   value={phone}
                   onChange={(e) => setPhone(e.target.value.replace(/\D/g, "").slice(0, 10))}
-                  className="h-12 flex-1 rounded-xl border border-black/[.12] bg-transparent px-3 text-black outline-none focus:border-indigo-500 focus:ring-2 focus:ring-indigo-500/30 dark:border-white/[.16] dark:text-zinc-50"
+                  className="h-12 min-w-0 flex-1 rounded-xl border border-black/[.12] bg-transparent px-3 text-black outline-none focus:border-indigo-500 focus:ring-2 focus:ring-indigo-500/30 dark:border-white/[.16] dark:text-zinc-50"
                 />
               </div>
               <button
