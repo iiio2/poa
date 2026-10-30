@@ -34,14 +34,17 @@ sequenceDiagram
     C->>API: GET /api/me (Cookie: pm_access)
     API-->>C: 200 profile  (or 401 if access expired)
 
-    Note over C,S: 5. Token refresh (rotation)
+    Note over C,S: 5. Token refresh (rotation + family reuse detection)
     C->>API: POST /api/token/refresh (Cookie: pm_refresh)
-    API->>S: verifyRefresh() → rotateRefresh() (old jti invalidated)
+    API->>S: verifyRefresh() → rotateRefresh() (old jti consumed, same family)
     API-->>C: Set-Cookie: new pm_access, pm_refresh
 
     Note over C,S: 6. Recovery (distinct path, no session issued)
-    C->>API: POST /api/pin/reset {phone, code, newPin}
-    API->>S: verifyOtp() → setPin()
+    C->>API: POST /api/otp/verify-reset {phone, code}
+    API->>S: verifyOtp() → mintResetToken()
+    API-->>C: {ok, resetToken}
+    C->>API: POST /api/pin/reset {phone, resetToken, newPin}
+    API->>S: verifyResetToken() → setPin()
     API-->>C: {ok}
 ```
 
@@ -55,10 +58,11 @@ sequenceDiagram
 | Device verification | within verify | `trustDevice()`, `isTrustedDevice()` | [lib/devices.ts](../lib/devices.ts) |
 | Token exchange | within verify | `mintAccess()`, `mintRefresh()` | [lib/tokens.ts](../lib/tokens.ts) |
 | Session readiness | `GET /api/me`, `GET /api/session` | `verifyAccess()`, `verifyRefresh()` | [pages/api/me.ts](../pages/api/me.ts), [pages/api/session.ts](../pages/api/session.ts) |
-| Token refresh | `POST /api/token/refresh` | `verifyRefresh()`, `rotateRefresh()` | [pages/api/token/refresh.ts](../pages/api/token/refresh.ts) |
+| Token refresh | `POST /api/token/refresh` | `verifyRefresh()`, `rotateRefresh()`, `revokeFamily()` | [pages/api/token/refresh.ts](../pages/api/token/refresh.ts) |
 | Logout | `POST /api/logout` | `revokeRefresh()`, `clearAuthCookies()` | [pages/api/logout.ts](../pages/api/logout.ts) |
-| PIN set | `POST /api/pin/set` | `setPin()` | [pages/api/pin/set.ts](../pages/api/pin/set.ts), [lib/users.ts](../lib/users.ts) |
-| Recovery (reset PIN) | `POST /api/pin/reset` | `verifyOtp()`, `setPin()` | [pages/api/pin/reset.ts](../pages/api/pin/reset.ts) |
+| PIN set / change | `POST /api/pin/set` | `setPin()`, `verifyPin()` (step-up) | [pages/api/pin/set.ts](../pages/api/pin/set.ts), [lib/users.ts](../lib/users.ts) |
+| Recovery step 1 (verify) | `POST /api/otp/verify-reset` | `verifyOtp()`, `mintResetToken()` | [pages/api/otp/verify-reset.ts](../pages/api/otp/verify-reset.ts) |
+| Recovery step 2 (reset PIN) | `POST /api/pin/reset` | `verifyResetToken()`, `setPin()` | [pages/api/pin/reset.ts](../pages/api/pin/reset.ts) |
 
 **Login vs. the other flows** — these are deliberately separate paths:
 
@@ -66,8 +70,9 @@ sequenceDiagram
 - **Device verification**: same endpoints; `newDevice` is `true` until the device
   completes a verify, after which `trustDevice()` records it.
 - **Token refresh**: no OTP; exchanges a valid refresh token for a new pair.
-- **Recovery**: `otp/request` → `pin/reset`; verifies an OTP and sets a new PIN
-  but **does not** issue a session.
+- **Recovery**: `otp/request` → `otp/verify-reset` (verifies the OTP, returns a
+  short-lived one-time reset token) → `pin/reset` (consumes the token, sets the
+  PIN). **No session** is issued.
 
 ## Request fields
 
@@ -75,9 +80,12 @@ sequenceDiagram
 | --- | --- | --- |
 | `POST /api/otp/request` | `phone`, `deviceId` | `phone` normalized to 10–15 digits |
 | `POST /api/otp/verify` | `phone`, `code`, `deviceId` | `code` is 6 digits, single-use |
+| `POST /api/otp/verify-reset` | `phone`, `code` | verifies OTP, returns `resetToken` |
 | `POST /api/token/refresh` | — | reads `pm_refresh` cookie |
-| `POST /api/pin/set` | `pin` | 4–6 digits; requires `pm_access` |
-| `POST /api/pin/reset` | `phone`, `code`, `newPin` | OTP-gated; no session issued |
+| `POST /api/pin/set` | `pin`, `currentPin?` | 4–6 digits; `currentPin` required to change an existing PIN |
+| `POST /api/pin/reset` | `phone`, `resetToken`, `newPin` | reset-token-gated; no session issued |
+
+All routes are POST-only (including `logout`); other methods get 405.
 
 ## Headers & cookies
 
@@ -98,9 +106,12 @@ Cookies gain `Secure` automatically when `NODE_ENV=production`.
 | `MOCK_OTP_CODE` | unset (random) | forces a fixed OTP code ([lib/otp-store.ts](../lib/otp-store.ts)) |
 | `NODE_ENV` | — | `production` hides the dev code and sets `Secure` cookies |
 
-Timing/limits (constants): OTP TTL 5 min, 5 attempts, 30s resend cooldown
-([lib/otp-store.ts](../lib/otp-store.ts)); access TTL 15 min, refresh TTL 30 days
-([lib/tokens.ts](../lib/tokens.ts)).
+Timing/limits (constants): OTP TTL 5 min, 5 attempts, 30s resend cooldown, max 5
+sends / 10 min per phone ([lib/otp-store.ts](../lib/otp-store.ts)); access TTL 15
+min, refresh TTL 30 days, reset-token TTL 5 min ([lib/tokens.ts](../lib/tokens.ts)).
+
+In production (`NODE_ENV=production`) the app **fails to start** unless
+`SESSION_SECRET` is set to a strong value (≥16 chars) — see [lib/crypto.ts](../lib/crypto.ts).
 
 ## State handling
 
@@ -109,8 +120,8 @@ stashed on `globalThis` so it survives hot reloads:
 
 | Store | Shape | File |
 | --- | --- | --- |
-| OTP codes | `phone → {code, expiresAt, attempts, lastSentAt}` | [lib/otp-store.ts](../lib/otp-store.ts) |
-| Refresh registry | `jti → {sub, did, exp, valid}` (rotation/revocation) | [lib/tokens.ts](../lib/tokens.ts) |
+| OTP codes | `phone → {code, expiresAt, attempts, lastSentAt}` + per-phone send log (rate cap) | [lib/otp-store.ts](../lib/otp-store.ts) |
+| Refresh registry | `jti → {sub, did, fam, exp, valid}`; rotation, family reuse-detection, expiry pruning | [lib/tokens.ts](../lib/tokens.ts) |
 | Trusted devices | `phone → Set<deviceId>` | [lib/devices.ts](../lib/devices.ts) |
 | Users / PIN | `phone → {pinHash, pinSalt}` (scrypt) | [lib/users.ts](../lib/users.ts) |
 

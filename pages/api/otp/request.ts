@@ -1,16 +1,11 @@
 import type { NextApiRequest, NextApiResponse } from "next";
 import { normalizePhone, requestOtp, revealCode } from "@/lib/otp-store";
 import { isTrustedDevice } from "@/lib/devices";
+import { requirePost } from "@/lib/http";
+import type { OtpRequestResponse } from "@/lib/api-types";
 
-type Data =
-  | { ok: true; expiresInSec: number; newDevice: boolean; devCode?: string }
-  | { ok: false; error: string; retryAfterSec?: number };
-
-export default function handler(req: NextApiRequest, res: NextApiResponse<Data>) {
-  if (req.method !== "POST") {
-    res.setHeader("Allow", "POST");
-    return res.status(405).json({ ok: false, error: "Method not allowed" });
-  }
+export default function handler(req: NextApiRequest, res: NextApiResponse<OtpRequestResponse>) {
+  if (!requirePost(req, res)) return;
 
   const phone = normalizePhone(req.body?.phone);
   if (!phone) {
@@ -22,11 +17,11 @@ export default function handler(req: NextApiRequest, res: NextApiResponse<Data>)
 
   const result = requestOtp(phone);
   if (!result.ok) {
-    return res.status(429).json({
-      ok: false,
-      error: `Please wait ${result.retryAfterSec}s before requesting a new code.`,
-      retryAfterSec: result.retryAfterSec,
-    });
+    const error =
+      result.reason === "cooldown"
+        ? `Please wait ${result.retryAfterSec}s before requesting a new code.`
+        : "Too many codes requested. Try again later.";
+    return res.status(429).json({ ok: false, error, retryAfterSec: result.retryAfterSec });
   }
 
   return res.status(200).json({

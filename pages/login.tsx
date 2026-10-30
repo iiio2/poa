@@ -5,6 +5,8 @@ import { Geist } from "next/font/google";
 import Brand from "@/components/Brand";
 import OtpInput from "@/components/OtpInput";
 import { getDeviceId } from "@/lib/device-id";
+import { apiPost } from "@/lib/client";
+import type { OtpRequestResponse, OtpVerifyResponse } from "@/lib/api-types";
 
 const geistSans = Geist({ variable: "--font-geist-sans", subsets: ["latin"] });
 
@@ -23,12 +25,11 @@ export default function Login() {
   const [loading, setLoading] = useState(false);
   const [resendIn, setResendIn] = useState(0);
   const [newDevice, setNewDevice] = useState(false);
+  const [focusSignal, setFocusSignal] = useState(0);
 
-  // Full number sent to the backend (digits only; backend strips symbols).
   const fullPhone = `${countryCode}${phone}`;
   const maskedPhone = phone ? `${countryCode} •••••${phone.slice(-3)}` : "";
 
-  // Resend countdown.
   useEffect(() => {
     if (resendIn <= 0) return;
     const t = setInterval(() => setResendIn((s) => Math.max(0, s - 1)), 1000);
@@ -39,19 +40,17 @@ export default function Login() {
     setError(null);
     setLoading(true);
     try {
-      const res = await fetch("/api/otp/request", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ phone: fullPhone, deviceId: getDeviceId() }),
+      const data = await apiPost<OtpRequestResponse>("/api/otp/request", {
+        phone: fullPhone,
+        deviceId: getDeviceId(),
       });
-      const data = await res.json();
       if (!data.ok) {
         setError(data.error);
-        if (data.retryAfterSec) setResendIn(data.retryAfterSec);
+        if ("retryAfterSec" in data && data.retryAfterSec) setResendIn(data.retryAfterSec);
         return false;
       }
       setDevCode(data.devCode ?? null);
-      setNewDevice(Boolean(data.newDevice));
+      setNewDevice(data.newDevice);
       setResendIn(RESEND_SECONDS);
       return true;
     } catch {
@@ -72,6 +71,7 @@ export default function Login() {
     if (ok) {
       setStep("code");
       setCode("");
+      setFocusSignal((n) => n + 1);
     }
   }
 
@@ -79,15 +79,15 @@ export default function Login() {
     setError(null);
     setLoading(true);
     try {
-      const res = await fetch("/api/otp/verify", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ phone: fullPhone, code: fullCode, deviceId: getDeviceId() }),
+      const data = await apiPost<OtpVerifyResponse>("/api/otp/verify", {
+        phone: fullPhone,
+        code: fullCode,
+        deviceId: getDeviceId(),
       });
-      const data = await res.json();
       if (!data.ok) {
         setError(data.error);
         setCode("");
+        setFocusSignal((n) => n + 1); // return focus to the first box
         return;
       }
       router.push("/dashboard");
@@ -99,9 +99,7 @@ export default function Login() {
   }
 
   return (
-    <div
-      className={`${geistSans.variable} flex min-h-screen flex-col bg-zinc-50 font-sans dark:bg-black`}
-    >
+    <div className={`${geistSans.variable} flex min-h-screen flex-col bg-zinc-50 font-sans dark:bg-black`}>
       <header className="flex items-center justify-center py-6">
         <Brand />
       </header>
@@ -125,6 +123,8 @@ export default function Login() {
               setCode={setCode}
               loading={loading}
               resendIn={resendIn}
+              invalid={Boolean(error)}
+              focusSignal={focusSignal}
               onComplete={verify}
               onResend={sendCode}
               onBack={() => {
@@ -137,28 +137,29 @@ export default function Login() {
           )}
 
           {devCode && (
-            <p className="mt-5 rounded-lg bg-amber-50 px-3 py-2 text-center text-sm text-amber-800 dark:bg-amber-950/40 dark:text-amber-300">
-              Demo code (no SMS sent):{" "}
-              <span className="font-mono font-semibold">{devCode}</span>
+            <p
+              aria-live="polite"
+              className="mt-5 rounded-lg bg-amber-50 px-3 py-2 text-center text-sm text-amber-800 dark:bg-amber-950/40 dark:text-amber-300"
+            >
+              Demo code (no SMS sent): <span className="font-mono font-semibold">{devCode}</span>
             </p>
           )}
           {error && (
-            <p className="mt-4 text-center text-sm text-red-600 dark:text-red-400">{error}</p>
+            <p id="login-error" role="alert" className="mt-4 text-center text-sm text-red-600 dark:text-red-400">
+              {error}
+            </p>
           )}
 
           <p className="mt-6 border-t border-black/[.06] pt-4 text-center text-sm text-zinc-500 dark:border-white/[.08] dark:text-zinc-400">
             Forgot your PIN?{" "}
-            <Link
-              href="/forgot-pin"
-              className="font-medium text-indigo-600 hover:text-indigo-700 dark:text-indigo-400"
-            >
+            <Link href="/forgot-pin" className="font-medium text-indigo-600 hover:text-indigo-700 dark:text-indigo-400">
               Reset it
             </Link>
           </p>
         </div>
       </main>
 
-      <footer className="py-6 text-center text-xs text-zinc-400">
+      <footer className="py-6 text-center text-xs text-zinc-500 dark:text-zinc-400">
         Demo wallet app · OTP is simulated locally
       </footer>
     </div>
@@ -182,9 +183,7 @@ function PhoneStep({
 }) {
   return (
     <>
-      <h1 className="text-xl font-semibold tracking-tight text-black dark:text-zinc-50">
-        Enter mobile number
-      </h1>
+      <h1 className="text-xl font-semibold tracking-tight text-black dark:text-zinc-50">Enter mobile number</h1>
       <p className="mt-1 text-sm text-zinc-500 dark:text-zinc-400">
         We&apos;ll send a one-time code to verify it&apos;s you.
       </p>
@@ -194,7 +193,7 @@ function PhoneStep({
             value={countryCode}
             onChange={(e) => setCountryCode(e.target.value)}
             aria-label="Country code"
-            className="h-12 rounded-xl border border-black/[.12] bg-transparent px-2 text-black outline-none focus:border-indigo-500 dark:border-white/[.16] dark:text-zinc-50 dark:[&>option]:bg-zinc-900"
+            className="h-12 rounded-xl border border-black/[.12] bg-transparent px-2 text-black outline-none focus:border-indigo-500 focus:ring-2 focus:ring-indigo-500/30 dark:border-white/[.16] dark:text-zinc-50 dark:[&>option]:bg-zinc-900"
           >
             <option value="+91">🇮🇳 +91</option>
             <option value="+1">🇺🇸 +1</option>
@@ -206,6 +205,7 @@ function PhoneStep({
             inputMode="numeric"
             autoComplete="tel-national"
             autoFocus
+            aria-label="Mobile number"
             placeholder="Mobile number"
             value={phone}
             onChange={(e) => setPhone(e.target.value.replace(/\D/g, "").slice(0, 10))}
@@ -220,7 +220,7 @@ function PhoneStep({
           {loading ? "Sending…" : "Continue"}
         </button>
       </form>
-      <p className="mt-4 text-center text-xs leading-5 text-zinc-400">
+      <p className="mt-4 text-center text-xs leading-5 text-zinc-500 dark:text-zinc-400">
         By continuing you agree to the demo Terms. No real messages are sent.
       </p>
     </>
@@ -234,6 +234,8 @@ function CodeStep({
   setCode,
   loading,
   resendIn,
+  invalid,
+  focusSignal,
   onComplete,
   onResend,
   onBack,
@@ -244,28 +246,30 @@ function CodeStep({
   setCode: (v: string) => void;
   loading: boolean;
   resendIn: number;
+  invalid: boolean;
+  focusSignal: number;
   onComplete: (code: string) => void;
   onResend: () => void;
   onBack: () => void;
 }) {
-  // Guard so auto-submit fires once per completed entry.
+  // Guard so a submit fires once per completed entry (covers auto-submit + button).
   const submitted = useRef(false);
   useEffect(() => {
     if (code.length !== 6) submitted.current = false;
   }, [code]);
 
+  function submit(full: string) {
+    if (submitted.current || loading) return;
+    submitted.current = true;
+    onComplete(full);
+  }
+
   return (
     <>
-      <button
-        type="button"
-        onClick={onBack}
-        className="text-sm text-zinc-500 hover:text-black dark:hover:text-zinc-50"
-      >
+      <button type="button" onClick={onBack} className="text-sm text-zinc-500 hover:text-black dark:hover:text-zinc-50">
         ← Back
       </button>
-      <h1 className="mt-3 text-xl font-semibold tracking-tight text-black dark:text-zinc-50">
-        Verify your number
-      </h1>
+      <h1 className="mt-3 text-xl font-semibold tracking-tight text-black dark:text-zinc-50">Verify your number</h1>
       <p className="mt-1 text-sm text-zinc-500 dark:text-zinc-400">
         Enter the 6-digit code sent to{" "}
         <span className="font-medium text-black dark:text-zinc-50">{maskedPhone}</span>
@@ -282,19 +286,18 @@ function CodeStep({
           value={code}
           onChange={setCode}
           disabled={loading}
-          onComplete={(full) => {
-            if (!submitted.current) {
-              submitted.current = true;
-              onComplete(full);
-            }
-          }}
+          invalid={invalid}
+          errorId="login-error"
+          autoFocus
+          focusSignal={focusSignal}
+          onComplete={submit}
         />
       </div>
 
       <button
         type="button"
         disabled={loading || code.length !== 6}
-        onClick={() => onComplete(code)}
+        onClick={() => submit(code)}
         className="mt-5 h-12 w-full rounded-xl bg-indigo-600 font-medium text-white transition-colors hover:bg-indigo-700 disabled:opacity-50"
       >
         {loading ? "Verifying…" : "Verify"}

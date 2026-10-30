@@ -1,4 +1,4 @@
-import { useRef } from "react";
+import { useEffect, useRef } from "react";
 
 type Props = {
   length?: number;
@@ -6,6 +6,11 @@ type Props = {
   onChange: (value: string) => void;
   onComplete?: (value: string) => void;
   disabled?: boolean;
+  invalid?: boolean;
+  errorId?: string;
+  /** Focus the first box on mount and whenever `focusSignal` changes. */
+  autoFocus?: boolean;
+  focusSignal?: number;
 };
 
 // Auto-advancing OTP boxes: typing moves forward, Backspace moves back,
@@ -16,10 +21,20 @@ export default function OtpInput({
   onChange,
   onComplete,
   disabled,
+  invalid,
+  errorId,
+  autoFocus,
+  focusSignal = 0,
 }: Props) {
   const inputs = useRef<Array<HTMLInputElement | null>>([]);
 
   const digits = Array.from({ length }, (_, i) => value[i] ?? "");
+
+  useEffect(() => {
+    // focusSignal is an intentional trigger: bump it to re-focus the first box.
+    // oxlint-disable-next-line react/exhaustive-effect-dependencies
+    if (autoFocus) inputs.current[0]?.focus();
+  }, [autoFocus, focusSignal]);
 
   function setDigit(index: number, digit: string) {
     const next = value.split("");
@@ -65,7 +80,13 @@ export default function OtpInput({
   }
 
   return (
-    <div className="flex justify-between gap-2" role="group" aria-label="One-time code">
+    <div
+      className="flex justify-between gap-2"
+      role="group"
+      aria-label="One-time code"
+      aria-invalid={invalid || undefined}
+      aria-describedby={invalid && errorId ? errorId : undefined}
+    >
       {digits.map((digit, i) => (
         <input
           key={i}
@@ -82,7 +103,11 @@ export default function OtpInput({
           onChange={(e) => handleChange(i, e.target.value)}
           onKeyDown={(e) => handleKeyDown(i, e)}
           onPaste={handlePaste}
-          className="h-12 w-11 rounded-xl border border-black/[.12] bg-transparent text-center text-lg font-semibold text-black outline-none transition-colors focus:border-indigo-500 focus:ring-2 focus:ring-indigo-500/30 disabled:opacity-50 dark:border-white/[.16] dark:text-zinc-50"
+          className={`h-12 w-11 rounded-xl border bg-transparent text-center text-lg font-semibold text-black outline-none transition-colors focus:ring-2 focus:ring-indigo-500/30 disabled:opacity-50 dark:text-zinc-50 ${
+            invalid
+              ? "border-red-400 focus:border-red-500"
+              : "border-black/[.12] focus:border-indigo-500 dark:border-white/[.16]"
+          }`}
         />
       ))}
     </div>

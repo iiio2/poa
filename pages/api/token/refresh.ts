@@ -7,18 +7,13 @@ import {
   rotateRefresh,
   verifyRefresh,
 } from "@/lib/tokens";
-
-type Data =
-  | { ok: true; accessExpiresInSec: number }
-  | { ok: false; error: string };
+import { requirePost } from "@/lib/http";
+import type { RefreshResponse } from "@/lib/api-types";
 
 // Token refresh: exchange a valid (non-revoked) refresh token for a new access
 // token, rotating the refresh token in the process.
-export default function handler(req: NextApiRequest, res: NextApiResponse<Data>) {
-  if (req.method !== "POST") {
-    res.setHeader("Allow", "POST");
-    return res.status(405).json({ ok: false, error: "Method not allowed" });
-  }
+export default function handler(req: NextApiRequest, res: NextApiResponse<RefreshResponse>) {
+  if (!requirePost(req, res)) return;
 
   const claims = verifyRefresh(req.cookies[REFRESH_COOKIE]);
   if (!claims) {

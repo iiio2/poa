@@ -1,26 +1,14 @@
 import type { NextApiRequest, NextApiResponse } from "next";
-import { normalizePhone, verifyOtp } from "@/lib/otp-store";
+import { normalizePhone, otpErrorResponse, verifyOtp } from "@/lib/otp-store";
 import { trustDevice } from "@/lib/devices";
-import { accessCookie, mintAccess, mintRefresh, refreshCookie } from "@/lib/tokens";
-
-type Data =
-  | { ok: true; phone: string; deviceId: string; trusted: true; accessExpiresInSec: number }
-  | { ok: false; error: string; attemptsLeft?: number };
-
-const MESSAGES: Record<string, string> = {
-  no_code: "No code was requested for this number. Request one first.",
-  expired: "That code has expired. Request a new one.",
-  too_many_attempts: "Too many incorrect attempts. Request a new code.",
-  mismatch: "Incorrect code.",
-};
+import { ACCESS_TTL_SEC, accessCookie, mintAccess, mintRefresh, refreshCookie } from "@/lib/tokens";
+import { requirePost } from "@/lib/http";
+import type { OtpVerifyResponse } from "@/lib/api-types";
 
 // Initial login / device verification: validates the OTP, binds the device as
 // trusted, and performs the token exchange (issues access + refresh).
-export default function handler(req: NextApiRequest, res: NextApiResponse<Data>) {
-  if (req.method !== "POST") {
-    res.setHeader("Allow", "POST");
-    return res.status(405).json({ ok: false, error: "Method not allowed" });
-  }
+export default function handler(req: NextApiRequest, res: NextApiResponse<OtpVerifyResponse>) {
+  if (!requirePost(req, res)) return;
 
   const phone = normalizePhone(req.body?.phone);
   const code = String(req.body?.code ?? "").trim();
@@ -31,12 +19,8 @@ export default function handler(req: NextApiRequest, res: NextApiResponse<Data>)
 
   const result = verifyOtp(phone, code);
   if (!result.ok) {
-    const status = result.reason === "mismatch" ? 401 : 400;
-    return res.status(status).json({
-      ok: false,
-      error: MESSAGES[result.reason] ?? "Verification failed.",
-      ...(result.attemptsLeft !== undefined ? { attemptsLeft: result.attemptsLeft } : {}),
-    });
+    const { status, error, attemptsLeft } = otpErrorResponse(result);
+    return res.status(status).json({ ok: false, error, ...(attemptsLeft !== undefined ? { attemptsLeft } : {}) });
   }
 
   trustDevice(phone, deviceId);
@@ -49,6 +33,6 @@ export default function handler(req: NextApiRequest, res: NextApiResponse<Data>)
     phone,
     deviceId,
     trusted: true,
-    accessExpiresInSec: 15 * 60,
+    accessExpiresInSec: ACCESS_TTL_SEC,
   });
 }

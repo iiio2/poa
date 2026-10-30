@@ -1,15 +1,14 @@
 import type { NextApiRequest, NextApiResponse } from "next";
 import { ACCESS_COOKIE, verifyAccess } from "@/lib/tokens";
-import { setPin } from "@/lib/users";
+import { hasPin, setPin, verifyPin } from "@/lib/users";
+import { requirePost } from "@/lib/http";
+import type { PinSetResponse } from "@/lib/api-types";
 
-type Data = { ok: true } | { ok: false; error: string };
-
-// Set the transaction PIN for the signed-in user (requires a valid access token).
-export default function handler(req: NextApiRequest, res: NextApiResponse<Data>) {
-  if (req.method !== "POST") {
-    res.setHeader("Allow", "POST");
-    return res.status(405).json({ ok: false, error: "Method not allowed" });
-  }
+// Set or change the transaction PIN (requires a valid access token). Changing an
+// existing PIN is a step-up action: the current PIN must be supplied, so a bare
+// session can't silently overwrite it.
+export default function handler(req: NextApiRequest, res: NextApiResponse<PinSetResponse>) {
+  if (!requirePost(req, res)) return;
 
   const claims = verifyAccess(req.cookies[ACCESS_COOKIE]);
   if (!claims) {
@@ -19,6 +18,13 @@ export default function handler(req: NextApiRequest, res: NextApiResponse<Data>)
   const pin = String(req.body?.pin ?? "");
   if (!/^\d{4,6}$/.test(pin)) {
     return res.status(400).json({ ok: false, error: "PIN must be 4-6 digits." });
+  }
+
+  if (hasPin(claims.sub)) {
+    const currentPin = String(req.body?.currentPin ?? "");
+    if (!verifyPin(claims.sub, currentPin)) {
+      return res.status(403).json({ ok: false, error: "Current PIN is incorrect." });
+    }
   }
 
   setPin(claims.sub, pin);

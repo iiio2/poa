@@ -1,34 +1,28 @@
 import type { NextApiRequest, NextApiResponse } from "next";
-import { normalizePhone, verifyOtp } from "@/lib/otp-store";
+import { normalizePhone } from "@/lib/otp-store";
+import { verifyResetToken } from "@/lib/tokens";
 import { setPin } from "@/lib/users";
+import { requirePost } from "@/lib/http";
+import type { PinResetResponse } from "@/lib/api-types";
 
-type Data = { ok: true } | { ok: false; error: string };
-
-// Recovery flow (distinct from login): reset the PIN by proving control of the
-// number with a fresh OTP. This path verifies the OTP itself and does NOT issue
-// a session — it only updates the PIN, then the user logs in normally.
-export default function handler(req: NextApiRequest, res: NextApiResponse<Data>) {
-  if (req.method !== "POST") {
-    res.setHeader("Allow", "POST");
-    return res.status(405).json({ ok: false, error: "Method not allowed" });
-  }
+// Recovery step 2 (distinct from login): consume the one-time reset token from
+// step 1 and set a new PIN. Does NOT issue a session — the user logs in after.
+export default function handler(req: NextApiRequest, res: NextApiResponse<PinResetResponse>) {
+  if (!requirePost(req, res)) return;
 
   const phone = normalizePhone(req.body?.phone);
-  const code = String(req.body?.code ?? "").trim();
+  const resetToken = String(req.body?.resetToken ?? "");
   const newPin = String(req.body?.newPin ?? "");
-  if (!phone || !code) {
-    return res.status(400).json({ ok: false, error: "Phone and code are required." });
+  if (!phone) {
+    return res.status(400).json({ ok: false, error: "Phone is required." });
   }
   if (!/^\d{4,6}$/.test(newPin)) {
     return res.status(400).json({ ok: false, error: "PIN must be 4-6 digits." });
   }
 
-  const result = verifyOtp(phone, code);
-  if (!result.ok) {
-    return res.status(result.reason === "mismatch" ? 401 : 400).json({
-      ok: false,
-      error: result.reason === "mismatch" ? "Incorrect code." : "Code invalid or expired.",
-    });
+  const sub = verifyResetToken(resetToken);
+  if (!sub || sub !== phone) {
+    return res.status(401).json({ ok: false, error: "Reset session invalid or expired. Start again." });
   }
 
   setPin(phone, newPin);

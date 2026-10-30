@@ -4,6 +4,8 @@ import { useRouter } from "next/router";
 import { Geist } from "next/font/google";
 import Brand from "@/components/Brand";
 import { REFRESH_COOKIE, verifyRefresh } from "@/lib/tokens";
+import { apiGet, apiPost, authedFetch } from "@/lib/client";
+import type { MeResponse, PinSetResponse, RefreshResponse, SessionResponse } from "@/lib/api-types";
 
 const geistSans = Geist({ variable: "--font-geist-sans", subsets: ["latin"] });
 
@@ -24,94 +26,106 @@ const ACTIVITY = [
   { name: "Metro Recharge", when: "Mon", amount: -120 },
 ];
 
-type SessionState = {
-  access: { valid: boolean; expiresInSec: number | null };
-  refresh: { valid: boolean; expiresInSec: number | null };
-  phone: string | null;
-  deviceId: string | null;
-  trusted: boolean;
-};
-
-type MeState = {
-  authenticated: boolean;
-  deviceId?: string;
-  trusted?: boolean;
-  hasPin?: boolean;
-};
-
-/** Fetch that transparently refreshes the access token once on a 401. */
-async function authedFetch(url: string, init?: RequestInit): Promise<Response> {
-  let res = await fetch(url, init);
-  if (res.status === 401) {
-    const r = await fetch("/api/token/refresh", { method: "POST" });
-    if (r.ok) res = await fetch(url, init);
-  }
-  return res;
-}
-
 export default function Dashboard({ phone }: Props) {
   const router = useRouter();
-  const [session, setSession] = useState<SessionState | null>(null);
-  const [me, setMe] = useState<MeState | null>(null);
+  const [session, setSession] = useState<SessionResponse | null>(null);
+  const [me, setMe] = useState<Extract<MeResponse, { ok: true }> | null>(null);
+  const [accessExpAt, setAccessExpAt] = useState<number | null>(null);
+  const [refreshExpAt, setRefreshExpAt] = useState<number | null>(null);
   const [pin, setPin] = useState("");
-  const [log, setLog] = useState<string>("Ready.");
-  const [, setTick] = useState(0);
+  const [currentPin, setCurrentPin] = useState("");
+  const [log, setLog] = useState("Ready.");
 
-  const refresh = useCallback(async () => {
-    const [s, m] = await Promise.all([
-      fetch("/api/session").then((r) => r.json()),
-      authedFetch("/api/me").then((r) => r.json()),
-    ]);
-    setSession(s);
-    setMe(m);
-  }, []);
+  const reload = useCallback(async () => {
+    try {
+      const meRes = await authedFetch("/api/me");
+      if (meRes.status === 401) {
+        router.push("/login");
+        return;
+      }
+      const m = (await meRes.json()) as MeResponse;
+      setMe(m.ok ? m : null);
+
+      const s = await apiGet<SessionResponse>("/api/session");
+      setSession(s);
+      const base = Date.now();
+      setAccessExpAt(s.access.valid && s.access.expiresInSec != null ? base + s.access.expiresInSec * 1000 : null);
+      setRefreshExpAt(s.refresh.valid && s.refresh.expiresInSec != null ? base + s.refresh.expiresInSec * 1000 : null);
+    } catch {
+      setLog("Network error while loading session.");
+    }
+  }, [router]);
 
   useEffect(() => {
-    // Fetch session + profile on mount (setState runs after the await, not sync).
+    // Load on mount, then keep the panel in sync (authedFetch auto-refreshes
+    // access when it has expired). setState runs after the awaits, not sync.
     // oxlint-disable-next-line react/set-state-in-effect
-    refresh();
-  }, [refresh]);
-
-  // Re-render every second for live countdowns.
-  useEffect(() => {
-    const t = setInterval(() => setTick((n) => n + 1), 1000);
+    reload();
+    const t = setInterval(reload, 20000);
     return () => clearInterval(t);
-  }, []);
+  }, [reload]);
 
   async function logout() {
-    await fetch("/api/logout", { method: "POST" });
-    router.push("/login");
+    try {
+      await apiPost("/api/logout");
+    } catch {
+      /* ignore — navigate away regardless */
+    } finally {
+      router.push("/login");
+    }
   }
 
   async function doRefresh() {
-    const res = await fetch("/api/token/refresh", { method: "POST" });
-    const data = await res.json();
-    setLog(res.ok ? "Access token refreshed (refresh token rotated)." : `Refresh failed: ${data.error}`);
-    refresh();
+    try {
+      const data = await apiPost<RefreshResponse>("/api/token/refresh");
+      setLog(data.ok ? "Access token refreshed (refresh token rotated)." : `Refresh failed: ${data.error}`);
+      await reload();
+    } catch {
+      setLog("Network error during refresh.");
+    }
   }
 
   async function callProtected() {
-    const res = await authedFetch("/api/me");
-    const data = await res.json();
-    setLog(
-      data.authenticated
-        ? `GET /api/me → 200 (phone ${data.phone}, trusted ${data.trusted})`
-        : `GET /api/me → 401 (${data.error})`,
-    );
-    refresh();
+    try {
+      const res = await authedFetch("/api/me");
+      if (res.status === 401) {
+        setLog("Session lost — redirecting to login.");
+        router.push("/login");
+        return;
+      }
+      const data = (await res.json()) as MeResponse;
+      setLog(
+        data.ok
+          ? `GET /api/me → 200 (phone ${data.phone}, trusted ${data.trusted})`
+          : `GET /api/me → 401 (${data.error})`,
+      );
+      await reload();
+    } catch {
+      setLog("Network error calling /api/me.");
+    }
   }
 
   async function savePin(e: React.FormEvent) {
     e.preventDefault();
-    const res = await authedFetch("/api/pin/set", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ pin }),
-    });
-    const data = await res.json();
-    setLog(res.ok ? "Transaction PIN set." : `PIN error: ${data.error}`);
-    setPin("");
-    refresh();
+    try {
+      const body = me?.hasPin ? { pin, currentPin } : { pin };
+      const res = await authedFetch("/api/pin/set", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      if (res.status === 401) {
+        router.push("/login");
+        return;
+      }
+      const data = (await res.json()) as PinSetResponse;
+      setLog(data.ok ? "Transaction PIN saved." : `PIN error: ${data.error}`);
+      setPin("");
+      setCurrentPin("");
+      await reload();
+    } catch {
+      setLog("Network error saving PIN.");
+    }
   }
 
   return (
@@ -127,16 +141,14 @@ export default function Dashboard({ phone }: Props) {
       </header>
 
       <main className="mx-auto max-w-md px-4 py-6">
-        {/* Balance card */}
         <section className="rounded-2xl bg-gradient-to-br from-indigo-500 to-violet-600 p-6 text-white shadow-sm">
           <p className="text-sm text-white/80">Wallet balance</p>
           <p className="mt-1 text-3xl font-semibold tracking-tight">₹ 1,245.00</p>
-          <p className="mt-4 text-xs text-white/70">
+          <p className="mt-4 text-xs text-white/85">
             Signed in as <span className="font-mono">{phone}</span>
           </p>
         </section>
 
-        {/* Quick actions */}
         <section className="mt-6 grid grid-cols-4 gap-3">
           {ACTIONS.map((label) => (
             <button
@@ -151,7 +163,6 @@ export default function Dashboard({ phone }: Props) {
           ))}
         </section>
 
-        {/* Recent activity */}
         <section className="mt-6">
           <h2 className="mb-2 text-sm font-semibold text-zinc-500 dark:text-zinc-400">Recent activity</h2>
           <ul className="divide-y divide-black/[.06] overflow-hidden rounded-2xl border border-black/[.06] bg-white dark:divide-white/[.08] dark:border-white/[.08] dark:bg-zinc-950">
@@ -174,10 +185,15 @@ export default function Dashboard({ phone }: Props) {
         </section>
 
         <AuthPanel
-          session={session}
-          me={me}
+          trusted={Boolean(session?.trusted || me?.trusted)}
+          deviceId={session?.deviceId ?? me?.deviceId ?? ""}
+          hasPin={Boolean(me?.hasPin)}
+          accessExpAt={accessExpAt}
+          refreshExpAt={refreshExpAt}
           pin={pin}
           setPin={setPin}
+          currentPin={currentPin}
+          setCurrentPin={setCurrentPin}
           log={log}
           onRefresh={doRefresh}
           onCallProtected={callProtected}
@@ -188,13 +204,29 @@ export default function Dashboard({ phone }: Props) {
   );
 }
 
-function fmt(sec: number | null): string {
-  if (sec == null) return "—";
+function fmt(sec: number): string {
   if (sec <= 0) return "expired";
   if (sec < 120) return `${sec}s`;
   if (sec < 3600) return `${Math.floor(sec / 60)}m`;
   if (sec < 86400) return `${Math.floor(sec / 3600)}h`;
   return `${Math.floor(sec / 86400)}d`;
+}
+
+// Self-ticking so only this node re-renders each second (not the whole page).
+// `now` is read from state (set in the interval callback) so render stays pure.
+function Countdown({ expAt }: { expAt: number | null }) {
+  const [now, setNow] = useState(0);
+  useEffect(() => {
+    const update = () => setNow(Date.now());
+    // oxlint-disable-next-line react/set-state-in-effect
+    update(); // initial clock sync
+    const t = setInterval(update, 1000);
+    return () => clearInterval(t);
+  }, []);
+  if (expAt == null) return <>none / expired</>;
+  if (now === 0) return <>…</>;
+  const remaining = Math.max(0, Math.round((expAt - now) / 1000));
+  return <>{remaining > 0 ? `valid · ${fmt(remaining)}` : "expired"}</>;
 }
 
 function Row({ label, children }: { label: string; children: React.ReactNode }) {
@@ -207,32 +239,39 @@ function Row({ label, children }: { label: string; children: React.ReactNode }) 
 }
 
 function AuthPanel({
-  session,
-  me,
+  trusted,
+  deviceId,
+  hasPin,
+  accessExpAt,
+  refreshExpAt,
   pin,
   setPin,
+  currentPin,
+  setCurrentPin,
   log,
   onRefresh,
   onCallProtected,
   onSavePin,
 }: {
-  session: SessionState | null;
-  me: MeState | null;
+  trusted: boolean;
+  deviceId: string;
+  hasPin: boolean;
+  accessExpAt: number | null;
+  refreshExpAt: number | null;
   pin: string;
   setPin: (v: string) => void;
+  currentPin: string;
+  setCurrentPin: (v: string) => void;
   log: string;
   onRefresh: () => void;
   onCallProtected: () => void;
   onSavePin: (e: React.FormEvent) => void;
 }) {
-  const deviceId = session?.deviceId ?? me?.deviceId ?? "";
   const shortDevice = deviceId ? `${deviceId.slice(0, 8)}…` : "—";
 
   return (
     <section className="mt-8 rounded-2xl border border-dashed border-indigo-300/70 bg-indigo-50/30 p-5 dark:border-indigo-500/30 dark:bg-indigo-500/5">
-      <h2 className="text-sm font-semibold text-indigo-700 dark:text-indigo-300">
-        Auth lifecycle (developer view)
-      </h2>
+      <h2 className="text-sm font-semibold text-indigo-700 dark:text-indigo-300">Auth lifecycle (developer view)</h2>
       <p className="mt-0.5 text-xs text-zinc-500 dark:text-zinc-400">
         Live view of the device-binding and token stages.
       </p>
@@ -240,7 +279,7 @@ function AuthPanel({
       <div className="mt-4 divide-y divide-black/[.06] dark:divide-white/[.08]">
         <Row label="Device">
           {shortDevice}{" "}
-          {session?.trusted || me?.trusted ? (
+          {trusted ? (
             <span className="ml-1 rounded bg-green-100 px-1.5 py-0.5 text-[10px] font-semibold text-green-700 dark:bg-green-500/20 dark:text-green-400">
               TRUSTED
             </span>
@@ -251,12 +290,12 @@ function AuthPanel({
           )}
         </Row>
         <Row label="Access token">
-          {session?.access.valid ? `valid · ${fmt(session.access.expiresInSec)}` : "none / expired"}
+          <Countdown expAt={accessExpAt} />
         </Row>
         <Row label="Refresh token">
-          {session?.refresh.valid ? `valid · ${fmt(session.refresh.expiresInSec)}` : "none"}
+          <Countdown expAt={refreshExpAt} />
         </Row>
-        <Row label="Transaction PIN">{me?.hasPin ? "set" : "not set"}</Row>
+        <Row label="Transaction PIN">{hasPin ? "set" : "not set"}</Row>
       </div>
 
       <div className="mt-4 flex flex-wrap gap-2">
@@ -274,22 +313,36 @@ function AuthPanel({
         </button>
       </div>
 
-      <form onSubmit={onSavePin} className="mt-4 flex gap-2">
-        <input
-          type="password"
-          inputMode="numeric"
-          placeholder="Set 4-6 digit PIN"
-          value={pin}
-          onChange={(e) => setPin(e.target.value.replace(/\D/g, "").slice(0, 6))}
-          className="h-10 flex-1 rounded-lg border border-black/[.12] bg-transparent px-3 text-sm text-black outline-none focus:border-indigo-500 dark:border-white/[.16] dark:text-zinc-50"
-        />
-        <button
-          type="submit"
-          disabled={pin.length < 4}
-          className="rounded-lg border border-black/[.12] px-3 text-sm font-medium text-black hover:bg-black/[.04] disabled:opacity-50 dark:border-white/[.16] dark:text-zinc-50 dark:hover:bg-white/[.06]"
-        >
-          Save PIN
-        </button>
+      <form onSubmit={onSavePin} className="mt-4 flex flex-col gap-2">
+        {hasPin && (
+          <input
+            type="password"
+            inputMode="numeric"
+            aria-label="Current PIN"
+            placeholder="Current PIN (required to change)"
+            value={currentPin}
+            onChange={(e) => setCurrentPin(e.target.value.replace(/\D/g, "").slice(0, 6))}
+            className="h-10 rounded-lg border border-black/[.12] bg-transparent px-3 text-sm text-black outline-none focus:border-indigo-500 dark:border-white/[.16] dark:text-zinc-50"
+          />
+        )}
+        <div className="flex gap-2">
+          <input
+            type="password"
+            inputMode="numeric"
+            aria-label={hasPin ? "New PIN" : "Set PIN"}
+            placeholder={hasPin ? "New 4-6 digit PIN" : "Set 4-6 digit PIN"}
+            value={pin}
+            onChange={(e) => setPin(e.target.value.replace(/\D/g, "").slice(0, 6))}
+            className="h-10 flex-1 rounded-lg border border-black/[.12] bg-transparent px-3 text-sm text-black outline-none focus:border-indigo-500 dark:border-white/[.16] dark:text-zinc-50"
+          />
+          <button
+            type="submit"
+            disabled={pin.length < 4 || (hasPin && currentPin.length < 4)}
+            className="rounded-lg border border-black/[.12] px-3 text-sm font-medium text-black hover:bg-black/[.04] disabled:opacity-50 dark:border-white/[.16] dark:text-zinc-50 dark:hover:bg-white/[.06]"
+          >
+            Save PIN
+          </button>
+        </div>
       </form>
 
       <pre className="mt-4 overflow-x-auto rounded-lg bg-black/[.04] p-3 text-xs text-zinc-700 dark:bg-white/[.06] dark:text-zinc-300">

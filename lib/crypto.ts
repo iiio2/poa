@@ -2,9 +2,23 @@ import crypto from "crypto";
 
 // Shared signing primitives for the mock auth stack. HMAC-SHA256 over a
 // base64url(JSON) body, producing compact `body.signature` tokens.
-// Set SESSION_SECRET in production; a dev fallback is used otherwise.
 
-const SECRET = process.env.SESSION_SECRET || "dev-insecure-secret-change-me";
+// The HMAC key, resolved lazily on first use (not at import, so builds don't
+// need it). Fail closed in production: a missing/weak SESSION_SECRET would let
+// anyone forge tokens with the committed default, so signing/verifying throws.
+let cachedSecret: string | null = null;
+function getSecret(): string {
+  if (cachedSecret !== null) return cachedSecret;
+  const s = process.env.SESSION_SECRET;
+  if (s && s.length >= 16) {
+    cachedSecret = s;
+  } else if (process.env.NODE_ENV === "production") {
+    throw new Error("SESSION_SECRET must be set to a strong value (>=16 chars) in production.");
+  } else {
+    cachedSecret = "dev-insecure-secret-change-me";
+  }
+  return cachedSecret;
+}
 
 export function b64url(input: Buffer | string): string {
   return Buffer.from(input)
@@ -19,7 +33,7 @@ export function b64urlDecode(input: string): Buffer {
 }
 
 export function hmac(data: string): string {
-  return b64url(crypto.createHmac("sha256", SECRET).update(data).digest());
+  return b64url(crypto.createHmac("sha256", getSecret()).update(data).digest());
 }
 
 /** Constant-time string compare that tolerates length mismatch. */

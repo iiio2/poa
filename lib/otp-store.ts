@@ -1,16 +1,18 @@
 import crypto from "crypto";
+import { safeEqual } from "./crypto";
+import { globalMap } from "./global-store";
 
 // In-memory OTP store for the mock flow. No SMS is sent — the code is logged
 // to the server console and (in dev) returned in the API response so you can
 // test the full flow without any provider.
 //
 // Note: this store is process-local and resets when the dev server reloads.
-// That is fine for a mock. Swap this module for a real provider + datastore
-// to go to production.
 
 const OTP_TTL_MS = 5 * 60 * 1000; // 5 minutes
 const MAX_ATTEMPTS = 5;
 const RESEND_COOLDOWN_MS = 30 * 1000; // 30 seconds
+const SEND_WINDOW_MS = 10 * 60 * 1000; // 10 minutes
+const MAX_SENDS_PER_WINDOW = 5;
 
 // Set MOCK_OTP_CODE to force a fixed code (e.g. 123456). Otherwise a random
 // 6-digit code is generated and revealed in dev.
@@ -23,10 +25,10 @@ type OtpEntry = {
   lastSentAt: number;
 };
 
-// Persist across hot reloads in dev.
-const store: Map<string, OtpEntry> =
-  (globalThis as { __otpStore?: Map<string, OtpEntry> }).__otpStore ?? new Map();
-(globalThis as { __otpStore?: Map<string, OtpEntry> }).__otpStore = store;
+const store = globalMap<string, OtpEntry>("__otpStore");
+// Send timestamps per phone — kept separately so the rate cap survives the
+// deletion of an OTP entry on success/lockout (a global-ish cap, not per-code).
+const sendLog = globalMap<string, number[]>("__otpSendLog");
 
 /** Normalize to digits only; returns null if it doesn't look like a phone number. */
 export function normalizePhone(raw: string): string | null {
@@ -42,7 +44,7 @@ function randomCode(): string {
 
 export type RequestResult =
   | { ok: true; code: string; expiresInSec: number }
-  | { ok: false; reason: "cooldown"; retryAfterSec: number };
+  | { ok: false; reason: "cooldown" | "rate_limited"; retryAfterSec: number };
 
 export function requestOtp(phone: string): RequestResult {
   const now = Date.now();
@@ -56,13 +58,18 @@ export function requestOtp(phone: string): RequestResult {
     };
   }
 
+  // Sustained-rate cap over a rolling window.
+  const recent = (sendLog.get(phone) ?? []).filter((t) => now - t < SEND_WINDOW_MS);
+  if (recent.length >= MAX_SENDS_PER_WINDOW) {
+    const retryAfterSec = Math.ceil((SEND_WINDOW_MS - (now - recent[0])) / 1000);
+    sendLog.set(phone, recent);
+    return { ok: false, reason: "rate_limited", retryAfterSec };
+  }
+  recent.push(now);
+  sendLog.set(phone, recent);
+
   const code = FIXED_CODE ?? randomCode();
-  store.set(phone, {
-    code,
-    expiresAt: now + OTP_TTL_MS,
-    attempts: 0,
-    lastSentAt: now,
-  });
+  store.set(phone, { code, expiresAt: now + OTP_TTL_MS, attempts: 0, lastSentAt: now });
 
   // Stand-in for "sending" the OTP.
   console.log(`[mock-otp] code for ${phone}: ${code}`);
@@ -70,9 +77,8 @@ export function requestOtp(phone: string): RequestResult {
   return { ok: true, code, expiresInSec: Math.floor(OTP_TTL_MS / 1000) };
 }
 
-export type VerifyResult =
-  | { ok: true }
-  | { ok: false; reason: "no_code" | "expired" | "too_many_attempts" | "mismatch"; attemptsLeft?: number };
+export type VerifyFailReason = "no_code" | "expired" | "too_many_attempts" | "mismatch";
+export type VerifyResult = { ok: true } | { ok: false; reason: VerifyFailReason; attemptsLeft?: number };
 
 export function verifyOtp(phone: string, code: string): VerifyResult {
   const entry = store.get(phone);
@@ -90,17 +96,33 @@ export function verifyOtp(phone: string, code: string): VerifyResult {
 
   entry.attempts += 1;
 
-  const a = Buffer.from(entry.code);
-  const b = Buffer.from(code || "");
-  const match = a.length === b.length && crypto.timingSafeEqual(a, b);
-
-  if (!match) {
+  if (!safeEqual(entry.code, code || "")) {
     return { ok: false, reason: "mismatch", attemptsLeft: MAX_ATTEMPTS - entry.attempts };
   }
 
   // Single-use: consume on success.
   store.delete(phone);
   return { ok: true };
+}
+
+/** Map a failed verify result to an HTTP status + user-facing message (shared by routes). */
+const VERIFY_MESSAGES: Record<VerifyFailReason, string> = {
+  no_code: "No code was requested for this number. Request one first.",
+  expired: "That code has expired. Request a new one.",
+  too_many_attempts: "Too many incorrect attempts. Request a new code.",
+  mismatch: "Incorrect code.",
+};
+
+export function otpErrorResponse(result: Extract<VerifyResult, { ok: false }>): {
+  status: number;
+  error: string;
+  attemptsLeft?: number;
+} {
+  return {
+    status: result.reason === "mismatch" ? 401 : 400,
+    error: VERIFY_MESSAGES[result.reason],
+    ...(result.attemptsLeft !== undefined ? { attemptsLeft: result.attemptsLeft } : {}),
+  };
 }
 
 /** Whether codes are revealed to the client (dev convenience). */
