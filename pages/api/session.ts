@@ -1,6 +1,6 @@
 import type { NextApiRequest, NextApiResponse } from "next";
 import { ACCESS_COOKIE, REFRESH_COOKIE, verifyAccess, verifyRefresh } from "@/lib/tokens";
-import { isTrustedDevice } from "@/lib/devices";
+import { DEVICES_COOKIE, isTrustedDevice, readDevices } from "@/lib/devices";
 import type { SessionResponse } from "@/lib/api-types";
 
 // Informational: reports the state of both tokens so the UI can render a live
@@ -16,14 +16,13 @@ export default function handler(req: NextApiRequest, res: NextApiResponse<Sessio
   const refresh = verifyRefresh(req.cookies[REFRESH_COOKIE]);
   const phone = refresh?.sub ?? access?.sub ?? null;
   const deviceId = refresh?.did ?? access?.did ?? null;
+  const devices = readDevices(req.cookies[DEVICES_COOKIE]);
   return res.status(200).json({
     ok: true,
     access: { valid: Boolean(access), expiresInSec: expiresInSec(access?.exp) },
     refresh: { valid: Boolean(refresh), expiresInSec: expiresInSec(refresh?.exp) },
     phone,
     deviceId,
-    // Trust reflects the device registry, so it stays accurate even once the
-    // short-lived access token has expired.
-    trusted: Boolean(phone && deviceId && isTrustedDevice(phone, deviceId)),
+    trusted: Boolean(phone && deviceId && isTrustedDevice(devices, deviceId)),
   });
 }

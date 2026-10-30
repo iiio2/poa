@@ -1,35 +1,30 @@
-import { globalMap } from "./global-store";
+import { signPayload, verifyPayload } from "./crypto";
+import { buildCookie } from "./cookies";
 
-// Trusted-device registry. A device becomes trusted for a phone number once it
-// completes an OTP verification. New (unseen) devices are flagged so the UI can
-// show a "verifying new device" step — the device-verification stage.
+// Stateless trusted-device list, stored in a signed, HttpOnly cookie (pm_devices)
+// per browser. A device becomes trusted once it completes an OTP verification;
+// unseen devices are flagged so the UI can show the device-verification step.
 
-type DeviceRecord = { trustedAt: number };
+export const DEVICES_COOKIE = "pm_devices";
+const DEVICES_TTL_SEC = 365 * 24 * 60 * 60;
+const MAX_DEVICES = 10; // bound the cookie size
 
-const devices = globalMap<string, Map<string, DeviceRecord>>("__devices");
+type DevicesClaims = { devs: string[]; exp: number };
 
-function deviceMap(phone: string): Map<string, DeviceRecord> {
-  let m = devices.get(phone);
-  if (!m) {
-    m = new Map();
-    devices.set(phone, m);
-  }
-  return m;
+export function readDevices(cookie: string | undefined): string[] {
+  const claims = verifyPayload<DevicesClaims>(cookie);
+  return Array.isArray(claims?.devs) ? claims.devs : [];
 }
 
-export function isTrustedDevice(phone: string, deviceId: string): boolean {
-  if (!deviceId) return false;
-  return deviceMap(phone).has(deviceId);
+export function isTrustedDevice(devices: string[], deviceId: string): boolean {
+  return Boolean(deviceId) && devices.includes(deviceId);
 }
 
-export function trustDevice(phone: string, deviceId: string): void {
-  if (!deviceId) return;
-  deviceMap(phone).set(deviceId, { trustedAt: Date.now() });
-}
-
-export function listDevices(phone: string): Array<{ deviceId: string; trustedAt: number }> {
-  return [...deviceMap(phone).entries()].map(([deviceId, r]) => ({
-    deviceId,
-    trustedAt: r.trustedAt,
-  }));
+/** Returns a Set-Cookie string with deviceId added to the trusted list. */
+export function addDeviceCookie(devices: string[], deviceId: string): string {
+  const set = new Set(devices);
+  if (deviceId) set.add(deviceId);
+  const devs = [...set].slice(-MAX_DEVICES);
+  const exp = Math.floor(Date.now() / 1000) + DEVICES_TTL_SEC;
+  return buildCookie(DEVICES_COOKIE, signPayload({ devs, exp }), DEVICES_TTL_SEC);
 }

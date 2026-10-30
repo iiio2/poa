@@ -1,6 +1,6 @@
 import type { NextApiRequest, NextApiResponse } from "next";
-import { normalizePhone, requestOtp, revealCode } from "@/lib/otp-store";
-import { isTrustedDevice } from "@/lib/devices";
+import { normalizePhone, requestOtp, revealCode, OTP_COOKIE } from "@/lib/otp-store";
+import { DEVICES_COOKIE, isTrustedDevice, readDevices } from "@/lib/devices";
 import { requirePost } from "@/lib/http";
 import type { OtpRequestResponse } from "@/lib/api-types";
 
@@ -13,17 +13,18 @@ export default function handler(req: NextApiRequest, res: NextApiResponse<OtpReq
   }
 
   const deviceId = String(req.body?.deviceId ?? "");
-  const newDevice = !isTrustedDevice(phone, deviceId);
+  const newDevice = !isTrustedDevice(readDevices(req.cookies[DEVICES_COOKIE]), deviceId);
 
-  const result = requestOtp(phone);
+  const result = requestOtp(req.cookies[OTP_COOKIE], phone);
   if (!result.ok) {
-    const error =
-      result.reason === "cooldown"
-        ? `Please wait ${result.retryAfterSec}s before requesting a new code.`
-        : "Too many codes requested. Try again later.";
-    return res.status(429).json({ ok: false, error, retryAfterSec: result.retryAfterSec });
+    return res.status(429).json({
+      ok: false,
+      error: `Please wait ${result.retryAfterSec}s before requesting a new code.`,
+      retryAfterSec: result.retryAfterSec,
+    });
   }
 
+  res.setHeader("Set-Cookie", result.cookie);
   return res.status(200).json({
     ok: true,
     expiresInSec: result.expiresInSec,

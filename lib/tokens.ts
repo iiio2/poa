@@ -1,13 +1,12 @@
-import { randomId, signPayload, verifyPayload } from "./crypto";
-import { globalMap } from "./global-store";
+import { signPayload, verifyPayload } from "./crypto";
+import { buildCookie, clearCookie } from "./cookies";
 
-// Two-token model (self-contained, no third party):
+// Stateless two-token model — tokens are self-contained signed values, so no
+// server-side registry is needed (works across serverless instances):
 //   access  — short-lived credential for protected API calls (15 min)
-//   refresh — long-lived proof of an active session (30 days), rotated on use.
-//
-// Rotation tracks a per-login "family": presenting an already-consumed refresh
-// token is treated as theft and revokes the whole family. Also mints a
-// short-lived one-time reset token used by the PIN-recovery flow.
+//   refresh — longer-lived proof of an active session (30 days)
+// Trade-off vs. a stateful store: no server-side revocation / reuse detection;
+// logout clears the cookies in the caller's browser.
 
 export const ACCESS_COOKIE = "pm_access";
 export const REFRESH_COOKIE = "pm_refresh";
@@ -29,28 +28,14 @@ export type RefreshClaims = {
   sub: string;
   typ: "refresh";
   did: string;
-  jti: string; // unique id, tracked for rotation/revocation
-  fam: string; // login family, shared across rotations
   iat: number;
   exp: number;
 };
 
 type ResetClaims = { sub: string; typ: "pin_reset"; iat: number; exp: number };
 
-type RefreshRecord = { sub: string; did: string; fam: string; exp: number; valid: boolean };
-
-const registry = globalMap<string, RefreshRecord>("__refreshRegistry");
-
 function now(): number {
   return Math.floor(Date.now() / 1000);
-}
-
-/** Drop records whose tokens have expired, so the registry stays bounded. */
-function prune(): void {
-  const t = now();
-  for (const [jti, r] of registry) {
-    if (r.exp < t) registry.delete(jti);
-  }
 }
 
 export function mintAccess(sub: string, did: string, trusted: boolean): string {
@@ -59,15 +44,10 @@ export function mintAccess(sub: string, did: string, trusted: boolean): string {
   return signPayload(claims);
 }
 
-export function mintRefresh(sub: string, did: string, fam?: string): { token: string; jti: string; fam: string } {
-  prune();
+export function mintRefresh(sub: string, did: string): string {
   const iat = now();
-  const jti = randomId(16);
-  const family = fam ?? randomId(16);
-  const exp = iat + REFRESH_TTL_SEC;
-  const claims: RefreshClaims = { sub, typ: "refresh", did, jti, fam: family, iat, exp };
-  registry.set(jti, { sub, did, fam: family, exp, valid: true });
-  return { token: signPayload(claims), jti, fam: family };
+  const claims: RefreshClaims = { sub, typ: "refresh", did, iat, exp: iat + REFRESH_TTL_SEC };
+  return signPayload(claims);
 }
 
 export function verifyAccess(token: string | undefined): AccessClaims | null {
@@ -77,35 +57,15 @@ export function verifyAccess(token: string | undefined): AccessClaims | null {
 
 export function verifyRefresh(token: string | undefined): RefreshClaims | null {
   const claims = verifyPayload<RefreshClaims>(token);
-  if (!claims || claims.typ !== "refresh") return null;
-  const record = registry.get(claims.jti);
-  if (!record) return null; // unknown token
-  if (!record.valid) {
-    // Reuse of a consumed/rotated token: treat as theft, revoke the family.
-    revokeFamily(record.fam);
-    return null;
-  }
-  return claims;
+  return claims && claims.typ === "refresh" ? claims : null;
 }
 
-/** Rotate: invalidate the presented refresh token and issue a fresh pair (same family). */
+/** Issue a fresh access + refresh pair from a valid refresh token. */
 export function rotateRefresh(claims: RefreshClaims): { access: string; refresh: string } {
-  const record = registry.get(claims.jti);
-  if (record) record.valid = false;
-  const access = mintAccess(claims.sub, claims.did, true);
-  const { token: refresh } = mintRefresh(claims.sub, claims.did, claims.fam);
-  return { access, refresh };
-}
-
-export function revokeRefresh(jti: string): void {
-  const record = registry.get(jti);
-  if (record) record.valid = false;
-}
-
-export function revokeFamily(fam: string): void {
-  for (const record of registry.values()) {
-    if (record.fam === fam) record.valid = false;
-  }
+  return {
+    access: mintAccess(claims.sub, claims.did, true),
+    refresh: mintRefresh(claims.sub, claims.did),
+  };
 }
 
 // One-time token proving a verified OTP, used to gate PIN reset without a session.
@@ -120,29 +80,14 @@ export function verifyResetToken(token: string | undefined): string | null {
   return claims && claims.typ === "pin_reset" ? claims.sub : null;
 }
 
-// Secure cookies require HTTPS, so a plain-HTTP demo (e.g. a LAN IP) would drop
-// them. Default to on in production, but allow COOKIE_SECURE to override.
-function cookieSecure(): boolean {
-  if (process.env.COOKIE_SECURE === "true") return true;
-  if (process.env.COOKIE_SECURE === "false") return false;
-  return process.env.NODE_ENV === "production";
-}
-
-function cookie(name: string, value: string, maxAge: number): string {
-  const parts = [`${name}=${value}`, "Path=/", "HttpOnly", "SameSite=Lax", `Max-Age=${maxAge}`];
-  if (cookieSecure()) parts.push("Secure");
-  return parts.join("; ");
-}
-
 export function accessCookie(token: string): string {
-  return cookie(ACCESS_COOKIE, token, ACCESS_TTL_SEC);
+  return buildCookie(ACCESS_COOKIE, token, ACCESS_TTL_SEC);
 }
 
 export function refreshCookie(token: string): string {
-  return cookie(REFRESH_COOKIE, token, REFRESH_TTL_SEC);
+  return buildCookie(REFRESH_COOKIE, token, REFRESH_TTL_SEC);
 }
 
 export function clearAuthCookies(): string[] {
-  // Reuse the builder so cleared cookies carry the same attributes (incl. Secure).
-  return [cookie(ACCESS_COOKIE, "", 0), cookie(REFRESH_COOKIE, "", 0)];
+  return [clearCookie(ACCESS_COOKIE), clearCookie(REFRESH_COOKIE)];
 }

@@ -1,36 +1,30 @@
-import { hashSecret, verifySecret } from "./crypto";
-import { globalMap } from "./global-store";
+import { hashSecret, signPayload, verifyPayload, verifySecret } from "./crypto";
+import { buildCookie } from "./cookies";
 
-// Minimal user store keyed by phone. Holds a hashed transaction PIN so we can
-// model a recovery flow (reset PIN via OTP) that is distinct from login.
+// Stateless transaction PIN, stored (hashed) in a signed, HttpOnly cookie
+// (pm_pin) per browser. Lets us model a recovery flow distinct from login.
 
-type UserRecord = { pinHash?: string; pinSalt?: string };
+export const PIN_COOKIE = "pm_pin";
+const PIN_TTL_SEC = 365 * 24 * 60 * 60;
 
-const users = globalMap<string, UserRecord>("__users");
+type PinClaims = { sub: string; hash: string; salt: string; exp: number };
 
-function getOrCreate(phone: string): UserRecord {
-  let r = users.get(phone);
-  if (!r) {
-    r = {};
-    users.set(phone, r);
-  }
-  return r;
+export function readPin(cookie: string | undefined): PinClaims | null {
+  return verifyPayload<PinClaims>(cookie);
 }
 
-export function hasPin(phone: string): boolean {
-  const r = users.get(phone);
-  return Boolean(r?.pinHash && r?.pinSalt);
+export function hasPin(pin: PinClaims | null, phone: string): boolean {
+  return Boolean(pin && pin.sub === phone && pin.hash && pin.salt);
 }
 
-export function setPin(phone: string, pin: string): void {
-  const { hash, salt } = hashSecret(pin);
-  const r = getOrCreate(phone);
-  r.pinHash = hash;
-  r.pinSalt = salt;
+export function verifyPin(pin: PinClaims | null, phone: string, value: string): boolean {
+  if (!hasPin(pin, phone)) return false;
+  return verifySecret(value, pin!.hash, pin!.salt);
 }
 
-export function verifyPin(phone: string, pin: string): boolean {
-  const r = users.get(phone);
-  if (!r?.pinHash || !r?.pinSalt) return false;
-  return verifySecret(pin, r.pinHash, r.pinSalt);
+/** Returns a Set-Cookie string storing a new (hashed) PIN for this phone. */
+export function pinCookie(phone: string, value: string): string {
+  const { hash, salt } = hashSecret(value);
+  const exp = Math.floor(Date.now() / 1000) + PIN_TTL_SEC;
+  return buildCookie(PIN_COOKIE, signPayload({ sub: phone, hash, salt, exp }), PIN_TTL_SEC);
 }

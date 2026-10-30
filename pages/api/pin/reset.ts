@@ -1,7 +1,7 @@
 import type { NextApiRequest, NextApiResponse } from "next";
 import { normalizePhone } from "@/lib/otp-store";
 import { verifyResetToken } from "@/lib/tokens";
-import { setPin } from "@/lib/users";
+import { pinCookie } from "@/lib/users";
 import { requirePost } from "@/lib/http";
 import type { PinResetResponse } from "@/lib/api-types";
 
@@ -25,6 +25,6 @@ export default function handler(req: NextApiRequest, res: NextApiResponse<PinRes
     return res.status(401).json({ ok: false, error: "Reset session invalid or expired. Start again." });
   }
 
-  setPin(phone, newPin);
+  res.setHeader("Set-Cookie", pinCookie(phone, newPin));
   return res.status(200).json({ ok: true });
 }

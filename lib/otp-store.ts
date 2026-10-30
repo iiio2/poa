@@ -1,34 +1,22 @@
 import crypto from "crypto";
-import { safeEqual } from "./crypto";
-import { globalMap } from "./global-store";
+import { b64urlDecode, hmac, safeEqual, signPayload, verifyPayload } from "./crypto";
+import { buildCookie, clearCookie } from "./cookies";
 
-// In-memory OTP store for the mock flow. No SMS is sent — the code is logged
-// to the server console and (in dev) returned in the API response so you can
-// test the full flow without any provider.
-//
-// Note: this store is process-local and resets when the dev server reloads.
+// Stateless OTP: the challenge lives in a signed, HttpOnly cookie (pm_otp) in the
+// requester's browser — no SMS, no server memory. The cookie holds a hash of the
+// code plus attempt count and issue time, so request → verify works across
+// serverless instances.
 
-const OTP_TTL_MS = 5 * 60 * 1000; // 5 minutes
+const OTP_TTL_SEC = 5 * 60;
 const MAX_ATTEMPTS = 5;
-const RESEND_COOLDOWN_MS = 30 * 1000; // 30 seconds
-const SEND_WINDOW_MS = 10 * 60 * 1000; // 10 minutes
-const MAX_SENDS_PER_WINDOW = 5;
+const RESEND_COOLDOWN_SEC = 30;
 
-// Set MOCK_OTP_CODE to force a fixed code (e.g. 123456). An empty or unset value
-// means random — `|| undefined` so `MOCK_OTP_CODE=` isn't treated as a fixed "".
+export const OTP_COOKIE = "pm_otp";
+
+// Set MOCK_OTP_CODE to force a fixed code; empty/unset means random.
 const FIXED_CODE = process.env.MOCK_OTP_CODE || undefined;
 
-type OtpEntry = {
-  code: string;
-  expiresAt: number;
-  attempts: number;
-  lastSentAt: number;
-};
-
-const store = globalMap<string, OtpEntry>("__otpStore");
-// Send timestamps per phone — kept separately so the rate cap survives the
-// deletion of an OTP entry on success/lockout (a global-ish cap, not per-code).
-const sendLog = globalMap<string, number[]>("__otpSendLog");
+type OtpClaims = { sub: string; ch: string; att: number; iat: number; exp: number };
 
 /** Normalize to digits only; returns null if it doesn't look like a phone number. */
 export function normalizePhone(raw: string): string | null {
@@ -38,74 +26,71 @@ export function normalizePhone(raw: string): string | null {
 }
 
 function randomCode(): string {
-  // 6-digit, zero-padded, from a uniform draw.
   return String(crypto.randomInt(0, 1_000_000)).padStart(6, "0");
 }
 
+function otpCookie(token: string): string {
+  return buildCookie(OTP_COOKIE, token, OTP_TTL_SEC);
+}
+
+// Decode without enforcing exp, so verify can distinguish "expired" from "no code".
+function decodeOtp(token: string | undefined): OtpClaims | null {
+  if (!token) return null;
+  const [body, sig] = token.split(".");
+  if (!body || !sig) return null;
+  if (!safeEqual(sig, hmac(body))) return null;
+  try {
+    return JSON.parse(b64urlDecode(body).toString("utf8")) as OtpClaims;
+  } catch {
+    return null;
+  }
+}
+
 export type RequestResult =
-  | { ok: true; code: string; expiresInSec: number }
-  | { ok: false; reason: "cooldown" | "rate_limited"; retryAfterSec: number };
+  | { ok: true; code: string; cookie: string; expiresInSec: number }
+  | { ok: false; retryAfterSec: number };
 
-export function requestOtp(phone: string): RequestResult {
-  const now = Date.now();
-  const existing = store.get(phone);
-
-  if (existing && now - existing.lastSentAt < RESEND_COOLDOWN_MS) {
-    return {
-      ok: false,
-      reason: "cooldown",
-      retryAfterSec: Math.ceil((RESEND_COOLDOWN_MS - (now - existing.lastSentAt)) / 1000),
-    };
+export function requestOtp(prevCookie: string | undefined, phone: string): RequestResult {
+  const t = Math.floor(Date.now() / 1000);
+  const prev = verifyPayload<OtpClaims>(prevCookie); // null if missing/expired
+  if (prev && prev.sub === phone && t - prev.iat < RESEND_COOLDOWN_SEC) {
+    return { ok: false, retryAfterSec: RESEND_COOLDOWN_SEC - (t - prev.iat) };
   }
-
-  // Sustained-rate cap over a rolling window.
-  const recent = (sendLog.get(phone) ?? []).filter((t) => now - t < SEND_WINDOW_MS);
-  if (recent.length >= MAX_SENDS_PER_WINDOW) {
-    const retryAfterSec = Math.ceil((SEND_WINDOW_MS - (now - recent[0])) / 1000);
-    sendLog.set(phone, recent);
-    return { ok: false, reason: "rate_limited", retryAfterSec };
-  }
-  recent.push(now);
-  sendLog.set(phone, recent);
 
   const code = FIXED_CODE ?? randomCode();
-  store.set(phone, { code, expiresAt: now + OTP_TTL_MS, attempts: 0, lastSentAt: now });
+  const claims: OtpClaims = { sub: phone, ch: hmac(code), att: 0, iat: t, exp: t + OTP_TTL_SEC };
 
   // Stand-in for "sending" the OTP.
   console.log(`[mock-otp] code for ${phone}: ${code}`);
 
-  return { ok: true, code, expiresInSec: Math.floor(OTP_TTL_MS / 1000) };
+  return { ok: true, code, cookie: otpCookie(signPayload(claims)), expiresInSec: OTP_TTL_SEC };
 }
 
 export type VerifyFailReason = "no_code" | "expired" | "too_many_attempts" | "mismatch";
-export type VerifyResult = { ok: true } | { ok: false; reason: VerifyFailReason; attemptsLeft?: number };
+export type VerifyResult =
+  | { ok: true; cookie: string } // cookie clears pm_otp (single-use)
+  | { ok: false; reason: VerifyFailReason; attemptsLeft?: number; cookie?: string };
 
-export function verifyOtp(phone: string, code: string): VerifyResult {
-  const entry = store.get(phone);
-  if (!entry) return { ok: false, reason: "no_code" };
+export function verifyOtp(prevCookie: string | undefined, phone: string, code: string): VerifyResult {
+  const prev = decodeOtp(prevCookie);
+  if (!prev || prev.sub !== phone) return { ok: false, reason: "no_code" };
 
-  if (Date.now() > entry.expiresAt) {
-    store.delete(phone);
-    return { ok: false, reason: "expired" };
+  const t = Math.floor(Date.now() / 1000);
+  if (t > prev.exp) return { ok: false, reason: "expired", cookie: clearCookie(OTP_COOKIE) };
+  if (prev.att >= MAX_ATTEMPTS) {
+    return { ok: false, reason: "too_many_attempts", cookie: clearCookie(OTP_COOKIE) };
   }
 
-  if (entry.attempts >= MAX_ATTEMPTS) {
-    store.delete(phone);
-    return { ok: false, reason: "too_many_attempts" };
+  if (!safeEqual(prev.ch, hmac(code || ""))) {
+    const att = prev.att + 1;
+    const next = otpCookie(signPayload({ ...prev, att }));
+    return { ok: false, reason: "mismatch", attemptsLeft: MAX_ATTEMPTS - att, cookie: next };
   }
 
-  entry.attempts += 1;
-
-  if (!safeEqual(entry.code, code || "")) {
-    return { ok: false, reason: "mismatch", attemptsLeft: MAX_ATTEMPTS - entry.attempts };
-  }
-
-  // Single-use: consume on success.
-  store.delete(phone);
-  return { ok: true };
+  // Single-use: clear the challenge on success.
+  return { ok: true, cookie: clearCookie(OTP_COOKIE) };
 }
 
-/** Map a failed verify result to an HTTP status + user-facing message (shared by routes). */
 const VERIFY_MESSAGES: Record<VerifyFailReason, string> = {
   no_code: "No code was requested for this number. Request one first.",
   expired: "That code has expired. Request a new one.",
@@ -125,9 +110,6 @@ export function otpErrorResponse(result: Extract<VerifyResult, { ok: false }>): 
   };
 }
 
-/**
- * Whether codes are revealed to the client. On in dev; in production it's off
- * unless MOCK_REVEAL_OTP=true (opt-in, for running this mock as a demo).
- */
+/** Whether codes are revealed to the client. On in dev; opt-in via MOCK_REVEAL_OTP in prod. */
 export const revealCode =
   process.env.NODE_ENV !== "production" || process.env.MOCK_REVEAL_OTP === "true";
